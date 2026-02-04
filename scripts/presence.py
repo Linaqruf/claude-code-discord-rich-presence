@@ -172,7 +172,6 @@ def load_config() -> dict:
         return config
 
     if not plugin_root:
-    if not plugin_root:
         return config
 
     config_path = plugin_root / ".claude-plugin" / CONFIG_FILE_NAME
