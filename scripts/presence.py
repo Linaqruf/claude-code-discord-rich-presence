@@ -39,6 +39,15 @@ MODEL_DISPLAY = {
     "claude-haiku-4-5-20241022": "Haiku 4.5",
 }
 
+# Model pricing per 1M tokens (input, output, cache_read)
+# Cache writes charged at input rate, cache reads at 10% of input
+MODEL_PRICING = {
+    "claude-opus-4-5-20251101": (15.00, 75.00, 1.50),
+    "claude-sonnet-4-5-20241022": (3.00, 15.00, 0.30),
+    "claude-sonnet-4-20250514": (3.00, 15.00, 0.30),
+    "claude-haiku-4-5-20241022": (0.80, 4.00, 0.08),
+}
+
 # Tool to display name mapping
 TOOL_DISPLAY = {
     "Edit": "Editing",
@@ -214,6 +223,91 @@ def format_model_name(model_id: str) -> str:
     return ""
 
 
+def get_session_tokens_and_cost(session_id: str = "") -> tuple[int, int, float]:
+    """Get total tokens and cost from current session's JSONL file.
+
+    Returns: (input_tokens, output_tokens, cost_usd)
+    """
+    if not PROJECTS_DIR.exists():
+        return (0, 0, 0.0)
+
+    # Find JSONL file for current session or most recent
+    jsonl_file = None
+    if session_id:
+        # Try to find file matching session ID
+        for path in PROJECTS_DIR.rglob(f"{session_id}.jsonl"):
+            jsonl_file = path
+            break
+
+    if not jsonl_file:
+        # Fall back to most recent JSONL file
+        jsonl_files = []
+        for path in PROJECTS_DIR.rglob("*.jsonl"):
+            try:
+                jsonl_files.append((path, path.stat().st_mtime))
+            except IOError:
+                continue
+
+        if not jsonl_files:
+            return (0, 0, 0.0)
+
+        jsonl_files.sort(key=lambda x: x[1], reverse=True)
+        jsonl_file = jsonl_files[0][0]
+
+    # Parse all assistant messages and sum tokens
+    total_input = 0
+    total_output = 0
+    total_cache_read = 0
+    total_cache_write = 0
+    last_model = ""
+
+    try:
+        with open(jsonl_file, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    msg = json.loads(line)
+                    if msg.get("type") == "assistant":
+                        message = msg.get("message", {})
+                        model = message.get("model", "")
+                        if model:
+                            last_model = model
+
+                        usage = message.get("usage", {})
+                        total_input += usage.get("input_tokens", 0)
+                        total_output += usage.get("output_tokens", 0)
+                        total_cache_read += usage.get("cache_read_input_tokens", 0)
+                        total_cache_write += usage.get("cache_creation_input_tokens", 0)
+                except json.JSONDecodeError:
+                    continue
+    except IOError:
+        return (0, 0, 0.0)
+
+    # Calculate cost
+    cost = 0.0
+    if last_model in MODEL_PRICING:
+        input_price, output_price, cache_read_price = MODEL_PRICING[last_model]
+        # Input + cache writes at input rate
+        cost += (total_input + total_cache_write) * input_price / 1_000_000
+        # Output at output rate
+        cost += total_output * output_price / 1_000_000
+        # Cache reads at reduced rate
+        cost += total_cache_read * cache_read_price / 1_000_000
+
+    # Total input includes cache tokens for display purposes
+    display_input = total_input + total_cache_read + total_cache_write
+
+    return (display_input, total_output, cost)
+
+
+def format_tokens(count: int) -> str:
+    """Format token count for display (e.g., 12.5k, 1.2M)."""
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    elif count >= 1000:
+        return f"{count / 1000:.1f}k"
+    return str(count)
+
+
 def read_hook_input() -> dict:
     """Read JSON input from stdin (provided by Claude Code hooks)."""
     try:
@@ -289,6 +383,9 @@ def run_daemon():
             git_branch = state.get("git_branch", "")
             model = state.get("model", "")
             session_start = state.get("session_start", int(time.time()))
+            input_tokens = state.get("input_tokens", 0)
+            output_tokens = state.get("output_tokens", 0)
+            cost = state.get("cost", 0.0)
 
             activity = TOOL_DISPLAY.get(tool, "Working")
 
@@ -298,14 +395,23 @@ def run_daemon():
             else:
                 details = f"Working on: {project}"
 
-            # Build state line: "Activity | Model" or just "Activity"
+            # Build state line: "Activity | Model | Cost" or simpler variants
+            parts = [activity]
             if model:
-                state_line = f"{activity} | {model}"
+                parts.append(model)
+            if cost > 0:
+                parts.append(f"${cost:.2f}")
+            state_line = " | ".join(parts)
+
+            # Build tooltip with token details
+            total_tokens = input_tokens + output_tokens
+            if total_tokens > 0:
+                large_text = f"Claude Code | {format_tokens(total_tokens)} tokens"
             else:
-                state_line = activity
+                large_text = "Claude Code"
 
             # Only update if something changed
-            current = {"details": details, "state_line": state_line}
+            current = {"details": details, "state_line": state_line, "large_text": large_text}
             if current != last_sent:
                 log(f"Sending to Discord: {details} | {state_line}")
                 try:
@@ -314,7 +420,7 @@ def run_daemon():
                         state=state_line,
                         start=session_start,
                         large_image="claude",
-                        large_text="Claude Code",
+                        large_text=large_text,
                     )
                     last_sent = current
                 except Exception as e:
@@ -363,6 +469,17 @@ def cmd_start():
     state["model"] = get_model_from_jsonl()
     state["last_update"] = now
     state["tool"] = ""
+
+    # Get session ID from hook input if available
+    session_id = hook_input.get("session_id", "")
+    state["session_id"] = session_id
+
+    # Initialize token tracking
+    input_tokens, output_tokens, cost = get_session_tokens_and_cost(session_id)
+    state["input_tokens"] = input_tokens
+    state["output_tokens"] = output_tokens
+    state["cost"] = cost
+
     write_state(state)
 
     log(f"Session started (active sessions: {refcount})")
@@ -413,6 +530,14 @@ def cmd_update():
 
     state["tool"] = tool_name
     state["last_update"] = int(time.time())
+
+    # Refresh token counts
+    session_id = state.get("session_id", "")
+    input_tokens, output_tokens, cost = get_session_tokens_and_cost(session_id)
+    state["input_tokens"] = input_tokens
+    state["output_tokens"] = output_tokens
+    state["cost"] = cost
+
     write_state(state)
 
     log(f"Updated activity: {tool_name}")
@@ -472,6 +597,16 @@ def cmd_status():
         if model:
             print(f"Model: {model}")
         print(f"Last tool: {state.get('tool', 'None')}")
+
+        # Show token stats
+        input_tokens = state.get('input_tokens', 0)
+        output_tokens = state.get('output_tokens', 0)
+        cost = state.get('cost', 0.0)
+        if input_tokens or output_tokens:
+            total = input_tokens + output_tokens
+            print(f"Tokens: {format_tokens(total)} ({format_tokens(input_tokens)} in / {format_tokens(output_tokens)} out)")
+            print(f"Cost: ${cost:.2f}")
+
         last_update = state.get("last_update", 0)
         if last_update:
             ago = int(time.time() - last_update)
