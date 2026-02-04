@@ -1,6 +1,6 @@
 {
   "name": "cc-discord-rpc",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Display Claude Code activity as Discord Rich Presence",
   "author": {
     "name": "ANTIGRAVITY"
