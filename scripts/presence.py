@@ -220,6 +220,85 @@ def is_process_alive(pid: int) -> bool:
             return False
 
 
+def get_claude_ancestor_pid() -> int | None:
+    """Find the Claude Code (node) process in our ancestor chain."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        # Get process info via Windows API
+        CreateToolhelp32Snapshot = ctypes.windll.kernel32.CreateToolhelp32Snapshot
+        Process32First = ctypes.windll.kernel32.Process32First
+        Process32Next = ctypes.windll.kernel32.Process32Next
+        CloseHandle = ctypes.windll.kernel32.CloseHandle
+
+        TH32CS_SNAPPROCESS = 0x00000002
+
+        class PROCESSENTRY32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", ctypes.c_char * 260),
+            ]
+
+        # Build a map of pid -> (parent_pid, exe_name)
+        snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snapshot == -1:
+            return None
+
+        process_map = {}
+        pe32 = PROCESSENTRY32()
+        pe32.dwSize = ctypes.sizeof(PROCESSENTRY32)
+
+        if Process32First(snapshot, ctypes.byref(pe32)):
+            while True:
+                pid = pe32.th32ProcessID
+                ppid = pe32.th32ParentProcessID
+                exe = pe32.szExeFile.decode("utf-8", errors="ignore").lower()
+                process_map[pid] = (ppid, exe)
+                if not Process32Next(snapshot, ctypes.byref(pe32)):
+                    break
+
+        CloseHandle(snapshot)
+
+        # Walk up the tree from current process looking for node.exe (Claude Code)
+        current_pid = os.getpid()
+        visited = set()
+        while current_pid in process_map and current_pid not in visited:
+            visited.add(current_pid)
+            ppid, exe = process_map[current_pid]
+            if "node" in exe or "claude" in exe:
+                return current_pid
+            current_pid = ppid
+
+        return None
+    else:
+        # Unix: walk up using /proc
+        current_pid = os.getpid()
+        visited = set()
+        while current_pid > 1 and current_pid not in visited:
+            visited.add(current_pid)
+            try:
+                with open(f"/proc/{current_pid}/comm", "r") as f:
+                    comm = f.read().strip().lower()
+                if "node" in comm or "claude" in comm:
+                    return current_pid
+                with open(f"/proc/{current_pid}/stat", "r") as f:
+                    stat = f.read()
+                    ppid = int(stat.split()[3])
+                    current_pid = ppid
+            except (OSError, ValueError, IndexError):
+                break
+        return None
+
+
 def read_sessions() -> dict:
     """Read active sessions {pid: timestamp}."""
     if SESSIONS_FILE.exists():
@@ -601,9 +680,13 @@ def cmd_start():
     project = hook_input.get("cwd", os.environ.get("CLAUDE_PROJECT_DIR", ""))
     project_name = get_project_name(project) if project else get_project_name()
 
-    # Register this session by parent PID (Claude Code's PID)
-    parent_pid = os.getppid()
-    session_count = add_session(parent_pid)
+    # Register this session by Claude Code's PID (walk up process tree)
+    claude_pid = get_claude_ancestor_pid()
+    if not claude_pid:
+        # Fallback to parent PID if we can't find Claude
+        claude_pid = os.getppid()
+        log(f"Warning: Could not find Claude ancestor, using parent PID {claude_pid}")
+    session_count = add_session(claude_pid)
 
     # Update state
     state = read_state()
@@ -629,7 +712,7 @@ def cmd_start():
 
     write_state(state)
 
-    log(f"Session started for PID {parent_pid} (active sessions: {session_count})")
+    log(f"Session started for PID {claude_pid} (active sessions: {session_count})")
 
     # Check if daemon is running
     if get_daemon_pid():
@@ -689,12 +772,14 @@ def cmd_update():
 
 def cmd_stop():
     """Handle 'stop' command - clear presence and stop daemon."""
-    # Unregister this session by parent PID
-    parent_pid = os.getppid()
-    remaining = remove_session(parent_pid)
+    # Unregister this session by Claude Code's PID
+    claude_pid = get_claude_ancestor_pid()
+    if not claude_pid:
+        claude_pid = os.getppid()
+    remaining = remove_session(claude_pid)
 
     if remaining > 0:
-        log(f"Session ended for PID {parent_pid} (active sessions: {remaining})")
+        log(f"Session ended for PID {claude_pid} (active sessions: {remaining})")
         return  # Don't stop daemon, other sessions still active
 
     log("Last session ended, stopping daemon")
