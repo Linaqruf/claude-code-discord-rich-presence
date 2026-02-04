@@ -137,10 +137,38 @@ def remove_pid():
         pass
 
 
-def get_project_name() -> str:
-    """Get project name from current working directory."""
-    cwd = os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())
-    return Path(cwd).name
+def get_project_name(project_path: str = "") -> str:
+    """Get project name from git remote origin or folder name.
+
+    Priority:
+    1. Git remote origin repo name (e.g., 'my-repo' from github.com/user/my-repo.git)
+    2. Folder name as fallback
+    """
+    import subprocess
+    import re
+
+    if not project_path:
+        project_path = os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())
+
+    folder_name = Path(project_path).name
+
+    # Try to get git remote origin URL
+    try:
+        result = subprocess.run(
+            ["git", "-C", project_path, "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            remote_url = result.stdout.strip()
+            # Parse repo name from URL
+            # Handles: https://github.com/user/repo.git, git@github.com:user/repo.git
+            match = re.search(r'[/:]([^/:]+?)(?:\.git)?$', remote_url)
+            if match:
+                return match.group(1)
+    except Exception:
+        pass
+
+    return folder_name
 
 
 def get_git_branch(project_path: str) -> str:
@@ -489,7 +517,7 @@ def cmd_start():
     """Handle 'start' command - spawn daemon if needed, update state."""
     hook_input = read_hook_input()
     project = hook_input.get("cwd", os.environ.get("CLAUDE_PROJECT_DIR", ""))
-    project_name = Path(project).name if project else get_project_name()
+    project_name = get_project_name(project) if project else get_project_name()
 
     # Increment refcount
     refcount = read_refcount() + 1
