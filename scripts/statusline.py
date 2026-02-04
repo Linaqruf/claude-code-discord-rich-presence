@@ -126,8 +126,8 @@ def write_state(state: dict):
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    except OSError:
-        pass
+    except OSError as e:
+        print(f"[statusline] Error writing state: {e}", file=sys.stderr)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -173,7 +173,7 @@ def main():
             "cache_read": cache_read,
             "cache_write": cache_write,
             "cost": cost,
-            "simple_cost": (total_input * 4 + total_output * 12) / 1_000_000,
+            "simple_cost": cost,  # Use actual cost (statusline doesn't have model-specific pricing)
         }
         state["statusline_update"] = int(datetime.now().timestamp())
         write_state(state)

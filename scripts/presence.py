@@ -821,7 +821,7 @@ def run_daemon():
             show_cost = display_cfg.get("show_cost", True)
             show_model = display_cfg.get("show_model", True)
             show_branch = display_cfg.get("show_branch", True)
-            show_file = display_cfg.get("show_file", True)
+            show_file = display_cfg.get("show_file", False)
 
             # Check for idle timeout - show "Idling" instead of clearing
             last_update = state.get("last_update", 0)
