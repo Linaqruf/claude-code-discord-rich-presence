@@ -148,8 +148,11 @@ def get_daemon_pid() -> int | None:
 
 def write_pid():
     """Write current PID to file."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    PID_FILE.write_text(str(os.getpid()))
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        PID_FILE.write_text(str(os.getpid()))
+    except OSError as e:
+        log(f"Warning: Could not write PID file: {e}")
 
 
 def remove_pid():
@@ -185,8 +188,12 @@ def get_project_name(project_path: str = "") -> str:
             match = re.search(r'[/:]([^/:]+?)(?:\.git)?$', remote_url)
             if match:
                 return match.group(1)
-    except Exception:
-        pass
+    except subprocess.TimeoutExpired:
+        log(f"Git command timed out for {project_path}")
+    except FileNotFoundError:
+        pass  # git not installed
+    except OSError as e:
+        log(f"Error running git: {e}")
 
     return folder_name
 
@@ -202,8 +209,12 @@ def get_git_branch(project_path: str) -> str:
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except Exception:
-        pass
+    except subprocess.TimeoutExpired:
+        log(f"Git branch command timed out for {project_path}")
+    except FileNotFoundError:
+        pass  # git not installed
+    except OSError as e:
+        log(f"Error getting git branch: {e}")
     return ""
 
 
@@ -363,7 +374,11 @@ def cleanup_dead_sessions() -> int:
 
     alive_sessions = {}
     for pid_str, timestamp in sessions.items():
-        pid = int(pid_str)
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            log(f"Invalid PID in sessions file: {pid_str}, removing")
+            continue
         if is_process_alive(pid):
             alive_sessions[pid_str] = timestamp
         else:
@@ -506,6 +521,8 @@ def get_session_tokens_and_cost(session_id: str = "") -> dict:
         cost += total_cache_read * cache_read_price / 1_000_000
         # Cache writes at premium rate (1.25x input)
         cost += total_cache_write * cache_write_price / 1_000_000
+    elif last_model:
+        log(f"Warning: Unknown model '{last_model}', cost calculation skipped")
 
     # Calculate simple cost (without cache benefits - what it would cost without caching)
     simple_cost = 0.0
@@ -743,16 +760,24 @@ def cmd_start():
         python_exe = sys.executable
         script_path = Path(__file__).resolve()
 
-        subprocess.Popen(
-            [python_exe, str(script_path), "daemon"],
-            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        try:
+            proc = subprocess.Popen(
+                [python_exe, str(script_path), "daemon"],
+                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            log(f"Spawned daemon subprocess (PID {proc.pid})")
+        except OSError as e:
+            log(f"Failed to spawn daemon: {e}")
     else:
         # Unix: fork and detach
-        pid = os.fork()
+        try:
+            pid = os.fork()
+        except OSError as e:
+            log(f"Failed to fork daemon: {e}")
+            return
         if pid == 0:
             # Child process
             os.setsid()
