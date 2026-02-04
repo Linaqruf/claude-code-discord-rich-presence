@@ -347,7 +347,11 @@ def read_sessions() -> dict:
 
 def write_sessions(sessions: dict):
     """Write active sessions to file."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        log(f"Warning: Could not create data directory: {e}")
+        return
     if not sessions:
         try:
             SESSIONS_FILE.unlink()
@@ -780,9 +784,12 @@ def cmd_start():
         if pid == 0:
             # Child process
             os.setsid()
-            sys.stdin.close()
-            sys.stdout.close()
-            sys.stderr.close()
+            try:
+                sys.stdin.close()
+                sys.stdout.close()
+                sys.stderr.close()
+            except (OSError, ValueError):
+                pass
             run_daemon()
             sys.exit(0)
 
