@@ -109,7 +109,7 @@ DEFAULT_CONFIG = {
         "show_cost": True,
         "show_model": True,
         "show_branch": True,
-        "show_file": True,
+        "show_file": False,  # Disabled by default (minor performance overhead)
     },
     "idle_timeout": 300,  # 5 minutes in seconds
 }
@@ -1027,18 +1027,24 @@ def cmd_update():
     state["tool"] = tool_name
     state["last_update"] = int(time.time())
 
-    # Extract and store filename if this is a file operation
-    filename = extract_file_from_tool_input(hook_input)
-    if filename:
-        state["file"] = filename
-    elif tool_name not in FILE_TOOLS:
-        # Clear file if tool is not a file operation
-        state["file"] = ""
+    # Extract and store filename only if show_file is enabled (saves overhead)
+    config = get_config()
+    show_file = config.get("display", {}).get("show_file", False)
+    filename = ""
+    if show_file:
+        filename = extract_file_from_tool_input(hook_input)
+        if filename:
+            state["file"] = filename
+        elif tool_name not in FILE_TOOLS:
+            state["file"] = ""
 
-    # Refresh token counts
-    session_id = state.get("session_id", "")
-    tokens = get_session_tokens_and_cost(session_id)
-    state["tokens"] = tokens
+    # Refresh token counts only if needed for display (saves ~20-50ms)
+    show_tokens = config.get("display", {}).get("show_tokens", True)
+    show_cost = config.get("display", {}).get("show_cost", True)
+    if show_tokens or show_cost:
+        session_id = state.get("session_id", "")
+        tokens = get_session_tokens_and_cost(session_id)
+        state["tokens"] = tokens
 
     write_state(state)
 

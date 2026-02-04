@@ -68,7 +68,7 @@ display:
   show_cost: true      # API cost ($0.18)
   show_model: true     # Model name (Opus 4.5)
   show_branch: true    # Git branch (main)
-  show_file: true      # Filename when editing
+  show_file: false     # Filename when editing (off by default)
 
 # Idle timeout in seconds (default: 300 = 5 minutes)
 idle_timeout: 300

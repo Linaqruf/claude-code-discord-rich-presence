@@ -12,7 +12,7 @@ display:
   show_cost: true      # Show API cost ($0.18)
   show_model: true     # Show model name (Opus 4.5)
   show_branch: true    # Show git branch (main)
-  show_file: true      # Show filename when editing (main.py)
+  show_file: false     # Show filename when editing (disabled by default)
 
 # Idle timeout in seconds - show "Idling" after this duration of inactivity
 # Default: 300 (5 minutes)
