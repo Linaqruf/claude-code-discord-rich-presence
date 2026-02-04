@@ -130,10 +130,28 @@ def read_state() -> dict:
 
 
 def write_state(state: dict):
-    """Write state to state file"""
+    """Write state to state file using atomic write pattern"""
+    import tempfile
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        content = json.dumps(state, indent=2)
+
+        # Write to temp file first, then atomic rename
+        fd, tmp_path = tempfile.mkstemp(dir=DATA_DIR, suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(content)
+            # On Windows, need to remove target first for rename
+            if sys.platform == "win32" and STATE_FILE.exists():
+                STATE_FILE.unlink()
+            os.rename(tmp_path, STATE_FILE)
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
     except OSError as e:
         print(f"[statusline] Error writing state: {e}", file=sys.stderr)
 

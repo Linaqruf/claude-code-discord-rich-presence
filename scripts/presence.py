@@ -278,7 +278,10 @@ def extract_file_from_tool_input(hook_input: dict) -> str:
 def truncate_filename(filename: str, max_length: int = 25) -> str:
     """Truncate filename for Discord display limits.
 
-    If filename is too long, truncate middle with '...' while preserving extension.
+    If filename exceeds max_length, keeps the start and end of the stem with '...'
+    in the middle, preserving the file extension.
+
+    Example: 'very_long_filename_here.py' -> 'very_lo...e_here.py'
     """
     if len(filename) <= max_length:
         return filename
@@ -308,10 +311,28 @@ def read_state() -> dict:
 
 
 def write_state(state: dict):
-    """Write state to state file."""
+    """Write state to state file using atomic write pattern."""
+    import tempfile
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        content = json.dumps(state, indent=2)
+
+        # Write to temp file first, then atomic rename
+        fd, tmp_path = tempfile.mkstemp(dir=DATA_DIR, suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(content)
+            # On Windows, need to remove target first for rename
+            if sys.platform == "win32" and STATE_FILE.exists():
+                STATE_FILE.unlink()
+            os.rename(tmp_path, STATE_FILE)
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
     except OSError as e:
         log(f"Warning: Could not write state: {e}")
 
@@ -755,7 +776,7 @@ def read_hook_input() -> dict:
             data = sys.stdin.read()
             if data.strip():
                 return json.loads(data)
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         pass
     return {}
 
