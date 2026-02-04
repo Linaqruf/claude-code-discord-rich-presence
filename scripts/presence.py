@@ -27,7 +27,10 @@ else:
 STATE_FILE = DATA_DIR / "state.json"
 PID_FILE = DATA_DIR / "daemon.pid"
 LOG_FILE = DATA_DIR / "daemon.log"
-REFCOUNT_FILE = DATA_DIR / "refcount"
+SESSIONS_FILE = DATA_DIR / "sessions.json"  # Tracks active session PIDs
+
+# Orphan check interval (seconds) - how often daemon checks for dead sessions
+ORPHAN_CHECK_INTERVAL = 30
 
 # Claude Code directories
 CLAUDE_DIR = Path.home() / ".claude"
@@ -198,29 +201,84 @@ def get_git_branch(project_path: str) -> str:
     return ""
 
 
-def read_refcount() -> int:
-    """Read current session refcount."""
-    if REFCOUNT_FILE.exists():
+def is_process_alive(pid: int) -> bool:
+    """Check if a process with given PID is still running."""
+    if sys.platform == "win32":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        return False
+    else:
         try:
-            return int(REFCOUNT_FILE.read_text().strip())
-        except (ValueError, OSError):
+            os.kill(pid, 0)  # Doesn't kill, just checks
+            return True
+        except (ProcessLookupError, PermissionError, OSError):
+            return False
+
+
+def read_sessions() -> dict:
+    """Read active sessions {pid: timestamp}."""
+    if SESSIONS_FILE.exists():
+        try:
+            return json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
             pass
-    return 0
+    return {}
 
 
-def write_refcount(count: int):
-    """Write session refcount."""
+def write_sessions(sessions: dict):
+    """Write active sessions to file."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if count <= 0:
+    if not sessions:
         try:
-            REFCOUNT_FILE.unlink()
+            SESSIONS_FILE.unlink()
         except OSError:
             pass
     else:
         try:
-            REFCOUNT_FILE.write_text(str(count), encoding="utf-8")
+            SESSIONS_FILE.write_text(json.dumps(sessions), encoding="utf-8")
         except OSError as e:
-            log(f"Warning: Could not write refcount: {e}")
+            log(f"Warning: Could not write sessions: {e}")
+
+
+def add_session(pid: int):
+    """Register a new session by its parent PID."""
+    sessions = read_sessions()
+    sessions[str(pid)] = int(time.time())
+    write_sessions(sessions)
+    return len(sessions)
+
+
+def remove_session(pid: int):
+    """Unregister a session by its parent PID."""
+    sessions = read_sessions()
+    sessions.pop(str(pid), None)
+    write_sessions(sessions)
+    return len(sessions)
+
+
+def cleanup_dead_sessions() -> int:
+    """Remove sessions whose parent PIDs are no longer alive. Returns remaining count."""
+    sessions = read_sessions()
+    if not sessions:
+        return 0
+
+    alive_sessions = {}
+    for pid_str, timestamp in sessions.items():
+        pid = int(pid_str)
+        if is_process_alive(pid):
+            alive_sessions[pid_str] = timestamp
+        else:
+            log(f"Session PID {pid} is dead, removing")
+
+    if len(alive_sessions) != len(sessions):
+        write_sessions(alive_sessions)
+
+    return len(alive_sessions)
 
 
 def get_model_from_jsonl() -> str:
@@ -413,9 +471,19 @@ def run_daemon():
     rpc = None
     connected = False
     last_sent = {}  # Track last sent state to avoid redundant updates
+    last_orphan_check = 0  # Track when we last checked for dead sessions
 
     while True:
         try:
+            # Periodically check for dead sessions (orphan cleanup)
+            now = time.time()
+            if now - last_orphan_check > ORPHAN_CHECK_INTERVAL:
+                last_orphan_check = now
+                active_count = cleanup_dead_sessions()
+                if active_count == 0:
+                    log("No active sessions remaining, daemon exiting")
+                    break
+
             # Try to connect if not connected
             if not connected:
                 try:
@@ -533,9 +601,9 @@ def cmd_start():
     project = hook_input.get("cwd", os.environ.get("CLAUDE_PROJECT_DIR", ""))
     project_name = get_project_name(project) if project else get_project_name()
 
-    # Increment refcount
-    refcount = read_refcount() + 1
-    write_refcount(refcount)
+    # Register this session by parent PID (Claude Code's PID)
+    parent_pid = os.getppid()
+    session_count = add_session(parent_pid)
 
     # Update state
     state = read_state()
@@ -561,7 +629,7 @@ def cmd_start():
 
     write_state(state)
 
-    log(f"Session started (active sessions: {refcount})")
+    log(f"Session started for PID {parent_pid} (active sessions: {session_count})")
 
     # Check if daemon is running
     if get_daemon_pid():
@@ -621,12 +689,12 @@ def cmd_update():
 
 def cmd_stop():
     """Handle 'stop' command - clear presence and stop daemon."""
-    # Decrement refcount
-    refcount = read_refcount() - 1
-    write_refcount(refcount)
+    # Unregister this session by parent PID
+    parent_pid = os.getppid()
+    remaining = remove_session(parent_pid)
 
-    if refcount > 0:
-        log(f"Session ended (active sessions: {refcount})")
+    if remaining > 0:
+        log(f"Session ended for PID {parent_pid} (active sessions: {remaining})")
         return  # Don't stop daemon, other sessions still active
 
     log("Last session ended, stopping daemon")
@@ -654,14 +722,18 @@ def cmd_status():
     """Handle 'status' command - show current status."""
     pid = get_daemon_pid()
     state = read_state()
-    refcount = read_refcount()
+    sessions = read_sessions()
 
     if pid:
         print(f"Daemon running (PID {pid})")
     else:
         print("Daemon not running")
 
-    print(f"Active sessions: {refcount}")
+    print(f"Active sessions: {len(sessions)}")
+    if sessions:
+        for spid, ts in sessions.items():
+            alive = "alive" if is_process_alive(int(spid)) else "DEAD"
+            print(f"  - PID {spid}: {alive}")
 
     if state:
         print(f"Project: {state.get('project', 'Unknown')}")
