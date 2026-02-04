@@ -234,13 +234,20 @@ def format_model_name(model_id: str) -> str:
     return ""
 
 
-def get_session_tokens_and_cost(session_id: str = "") -> tuple[int, int, float]:
+def get_session_tokens_and_cost(session_id: str = "") -> dict:
     """Get total tokens and cost from current session's JSONL file.
 
-    Returns: (input_tokens, output_tokens, cost_usd)
+    Returns: dict with input, output, cache_read, cache_write, cost
     """
+    empty_result = {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "cost": 0.0,
+    }
     if not PROJECTS_DIR.exists():
-        return (0, 0, 0.0)
+        return empty_result
 
     # Find JSONL file for current session or most recent
     jsonl_file = None
@@ -260,7 +267,7 @@ def get_session_tokens_and_cost(session_id: str = "") -> tuple[int, int, float]:
                 continue
 
         if not jsonl_files:
-            return (0, 0, 0.0)
+            return empty_result
 
         jsonl_files.sort(key=lambda x: x[1], reverse=True)
         jsonl_file = jsonl_files[0][0]
@@ -291,7 +298,7 @@ def get_session_tokens_and_cost(session_id: str = "") -> tuple[int, int, float]:
                 except json.JSONDecodeError:
                     continue
     except IOError:
-        return (0, 0, 0.0)
+        return empty_result
 
     # Calculate cost
     cost = 0.0
@@ -304,10 +311,20 @@ def get_session_tokens_and_cost(session_id: str = "") -> tuple[int, int, float]:
         # Cache reads at reduced rate
         cost += total_cache_read * cache_read_price / 1_000_000
 
-    # Total input includes cache tokens for display purposes
-    display_input = total_input + total_cache_read + total_cache_write
+    # Calculate simple cost (without cache benefits - what it would cost without caching)
+    simple_cost = 0.0
+    if last_model in MODEL_PRICING:
+        input_price, output_price, _ = MODEL_PRICING[last_model]
+        simple_cost = total_input * input_price / 1_000_000 + total_output * output_price / 1_000_000
 
-    return (display_input, total_output, cost)
+    return {
+        "input": total_input,
+        "output": total_output,
+        "cache_read": total_cache_read,
+        "cache_write": total_cache_write,
+        "cost": cost,
+        "simple_cost": simple_cost,
+    }
 
 
 def format_tokens(count: int) -> str:
@@ -394,35 +411,46 @@ def run_daemon():
             git_branch = state.get("git_branch", "")
             model = state.get("model", "")
             session_start = state.get("session_start", int(time.time()))
-            input_tokens = state.get("input_tokens", 0)
-            output_tokens = state.get("output_tokens", 0)
-            cost = state.get("cost", 0.0)
+
+            # Get token data
+            tokens = state.get("tokens", {})
+            input_tokens = tokens.get("input", 0)
+            output_tokens = tokens.get("output", 0)
+            cache_read = tokens.get("cache_read", 0)
+            cache_write = tokens.get("cache_write", 0)
+            cost = tokens.get("cost", 0.0)
+            simple_cost = tokens.get("simple_cost", 0.0)
 
             activity = TOOL_DISPLAY.get(tool, "Working")
 
-            # Build details line: "Working on: project (branch)"
+            # Build details line: "Activity project (branch)"
             if git_branch:
-                details = f"Working on: {project} ({git_branch})"
+                details = f"{activity} {project} ({git_branch})"
             else:
-                details = f"Working on: {project}"
+                details = f"{activity} {project}"
 
-            # Build state line: "Activity | Model | Cost" or simpler variants
-            parts = [activity]
-            if model:
-                parts.append(model)
-            if cost > 0:
-                parts.append(f"${cost:.2f}")
-            state_line = " | ".join(parts)
+            # Cycle state line every 8s: 5s simple, 3s cached
+            cycle_pos = int(time.time()) % 8
+            show_simple = cycle_pos < 5  # 0-4 = simple (5s), 5-7 = cached (3s)
 
-            # Build tooltip with token details
-            total_tokens = input_tokens + output_tokens
-            if total_tokens > 0:
-                large_text = f"Claude Code | {format_tokens(total_tokens)} tokens"
+            # Simple = input + output only
+            simple_tokens = input_tokens + output_tokens
+            # Cached = total including cache
+            cached_tokens = input_tokens + output_tokens + cache_read + cache_write
+
+            if show_simple:
+                # Simple view: input/output tokens only
+                tokens_display = format_tokens(simple_tokens) if simple_tokens > 0 else "0"
+                cost_display = f"${simple_cost:.2f}" if simple_cost > 0 else "$0.00"
+                state_line = f"{model} • {tokens_display} tokens • {cost_display}" if model else f"{tokens_display} tokens • {cost_display}"
             else:
-                large_text = "Claude Code"
+                # Cached view: total with cache
+                tokens_display = format_tokens(cached_tokens) if cached_tokens > 0 else "0"
+                cost_display = f"${cost:.2f}" if cost > 0 else "$0.00"
+                state_line = f"{model} • {tokens_display} cached • {cost_display}" if model else f"{tokens_display} cached • {cost_display}"
 
-            # Only update if something changed
-            current = {"details": details, "state_line": state_line, "large_text": large_text}
+            # Only update if something changed (check every cycle)
+            current = {"details": details, "state_line": state_line}
             if current != last_sent:
                 log(f"Sending to Discord: {details} | {state_line}")
                 try:
@@ -431,7 +459,7 @@ def run_daemon():
                         state=state_line,
                         start=session_start,
                         large_image="claude",
-                        large_text=large_text,
+                        large_text="Claude Code",
                     )
                     last_sent = current
                 except Exception as e:
@@ -486,10 +514,8 @@ def cmd_start():
     state["session_id"] = session_id
 
     # Initialize token tracking
-    input_tokens, output_tokens, cost = get_session_tokens_and_cost(session_id)
-    state["input_tokens"] = input_tokens
-    state["output_tokens"] = output_tokens
-    state["cost"] = cost
+    tokens = get_session_tokens_and_cost(session_id)
+    state["tokens"] = tokens
 
     write_state(state)
 
@@ -544,10 +570,8 @@ def cmd_update():
 
     # Refresh token counts
     session_id = state.get("session_id", "")
-    input_tokens, output_tokens, cost = get_session_tokens_and_cost(session_id)
-    state["input_tokens"] = input_tokens
-    state["output_tokens"] = output_tokens
-    state["cost"] = cost
+    tokens = get_session_tokens_and_cost(session_id)
+    state["tokens"] = tokens
 
     write_state(state)
 
@@ -610,13 +634,20 @@ def cmd_status():
         print(f"Last tool: {state.get('tool', 'None')}")
 
         # Show token stats
-        input_tokens = state.get('input_tokens', 0)
-        output_tokens = state.get('output_tokens', 0)
-        cost = state.get('cost', 0.0)
-        if input_tokens or output_tokens:
-            total = input_tokens + output_tokens
-            print(f"Tokens: {format_tokens(total)} ({format_tokens(input_tokens)} in / {format_tokens(output_tokens)} out)")
-            print(f"Cost: ${cost:.2f}")
+        tokens = state.get('tokens', {})
+        input_t = tokens.get('input', 0)
+        output_t = tokens.get('output', 0)
+        cache_read = tokens.get('cache_read', 0)
+        cache_write = tokens.get('cache_write', 0)
+        cost = tokens.get('cost', 0.0)
+        simple_cost = tokens.get('simple_cost', 0.0)
+
+        if input_t or output_t or cache_read:
+            simple = input_t + output_t
+            cached = simple + cache_read + cache_write
+            print(f"Tokens (simple): {format_tokens(simple)} ({format_tokens(input_t)} in / {format_tokens(output_t)} out)")
+            print(f"Tokens (cached): {format_tokens(cached)} (+{format_tokens(cache_read)} read / +{format_tokens(cache_write)} write)")
+            print(f"Cost: ${cost:.2f} (${simple_cost:.2f} without cache)")
 
         last_update = state.get("last_update", 0)
         if last_update:
