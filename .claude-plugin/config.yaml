@@ -17,16 +17,3 @@ display:
 # Idle timeout in seconds - show "Idling" after this duration of inactivity
 # Default: 300 (5 minutes)
 idle_timeout: 300
-
-# Data source for tokens/cost
-# - "statusline": Use Claude Code statusline (recommended, minimal hook overhead)
-# - "jsonl": Parse JSONL files (legacy, ~20-50ms overhead per tool use)
-#
-# To use statusline, add to ~/.claude/settings.json:
-# {
-#   "statusLine": {
-#     "type": "command",
-#     "command": "python /path/to/cc-discord-rpc/scripts/statusline.py"
-#   }
-# }
-data_source: statusline

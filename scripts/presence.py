@@ -42,7 +42,6 @@ ORPHAN_CHECK_INTERVAL = 30
 
 # Claude Code directories
 CLAUDE_DIR = Path.home() / ".claude"
-PROJECTS_DIR = CLAUDE_DIR / "projects"
 
 # Model display names
 MODEL_DISPLAY = {
@@ -55,21 +54,6 @@ MODEL_DISPLAY = {
     # Claude 4 series
     "claude-opus-4-20250514": "Opus 4",
     "claude-sonnet-4-20250514": "Sonnet 4",
-}
-
-# Model pricing per 1M tokens (input, output, cache_read, cache_write)
-# Cache reads at 0.1x input rate, cache writes at 1.25x input rate
-MODEL_PRICING = {
-    # Claude 4.5 series
-    "claude-opus-4-5-20251101": (5.00, 25.00, 0.50, 6.25),
-    "claude-sonnet-4-5-20250514": (3.00, 15.00, 0.30, 3.75),
-    "claude-haiku-4-5-20250414": (1.00, 5.00, 0.10, 1.25),
-    # Claude 4 series
-    "claude-opus-4-20250514": (15.00, 75.00, 1.50, 18.75),
-    "claude-sonnet-4-20250514": (3.00, 15.00, 0.30, 3.75),
-    # Legacy/fallback
-    "claude-sonnet-4-5-20241022": (3.00, 15.00, 0.30, 3.75),
-    "claude-haiku-4-5-20241022": (1.00, 5.00, 0.10, 1.25),
 }
 
 # Tool to display name mapping (keep short for Discord limit)
@@ -113,10 +97,6 @@ DEFAULT_CONFIG = {
         "show_file": False,  # Disabled by default (minor performance overhead)
     },
     "idle_timeout": 300,  # 5 minutes in seconds
-    # Data source for tokens/cost:
-    # - "statusline": Use Claude Code statusline (recommended, no JSONL parsing)
-    # - "jsonl": Parse JSONL files (legacy, higher overhead)
-    "data_source": "statusline",
 }
 CONFIG_RELOAD_INTERVAL = 30  # Reload config every 30 seconds
 
@@ -203,14 +183,6 @@ def load_config() -> dict:
                 config["idle_timeout"] = int(timeout)
             else:
                 log(f"Warning: Invalid idle_timeout '{timeout}', using default")
-
-        # Merge data_source
-        if "data_source" in user_config:
-            source = user_config["data_source"]
-            if source in ("statusline", "jsonl"):
-                config["data_source"] = source
-            else:
-                log(f"Warning: Invalid data_source '{source}', using default")
 
         log(f"Loaded config from {config_path}")
 
@@ -616,50 +588,6 @@ def cleanup_dead_sessions() -> int:
     return len(alive_sessions)
 
 
-def find_most_recent_jsonl() -> Path | None:
-    """Find the most recently modified JSONL file in PROJECTS_DIR."""
-    if not PROJECTS_DIR.exists():
-        return None
-
-    jsonl_files = []
-    for path in PROJECTS_DIR.rglob("*.jsonl"):
-        try:
-            jsonl_files.append((path, path.stat().st_mtime))
-        except OSError:
-            continue
-
-    if not jsonl_files:
-        return None
-
-    jsonl_files.sort(key=lambda x: x[1], reverse=True)
-    return jsonl_files[0][0]
-
-
-def get_model_from_jsonl() -> str:
-    """Get model name from most recent JSONL file."""
-    recent_file = find_most_recent_jsonl()
-    if not recent_file:
-        return ""
-
-    # Parse last assistant message with model
-    last_model = ""
-    try:
-        with open(recent_file, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    msg = json.loads(line)
-                    if msg.get("type") == "assistant":
-                        model = msg.get("message", {}).get("model", "")
-                        if model:
-                            last_model = model
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        pass
-
-    return format_model_name(last_model)
-
-
 def format_model_name(model_id: str) -> str:
     """Convert model ID to display name."""
     if model_id in MODEL_DISPLAY:
@@ -671,92 +599,6 @@ def format_model_name(model_id: str) -> str:
     if "haiku" in model_id.lower():
         return "Haiku"
     return ""
-
-
-def get_session_tokens_and_cost(session_id: str = "") -> dict:
-    """Get total tokens and cost from current session's JSONL file.
-
-    Returns: dict with input, output, cache_read, cache_write, cost, simple_cost
-    """
-    empty_result = {
-        "input": 0,
-        "output": 0,
-        "cache_read": 0,
-        "cache_write": 0,
-        "cost": 0.0,
-        "simple_cost": 0.0,
-    }
-
-    # Find JSONL file for current session or most recent
-    jsonl_file = None
-    if session_id and PROJECTS_DIR.exists():
-        # Try to find file matching session ID
-        for path in PROJECTS_DIR.rglob(f"{session_id}.jsonl"):
-            jsonl_file = path
-            break
-
-    if not jsonl_file:
-        jsonl_file = find_most_recent_jsonl()
-        if not jsonl_file:
-            return empty_result
-
-    # Parse all assistant messages and sum tokens
-    total_input = 0
-    total_output = 0
-    total_cache_read = 0
-    total_cache_write = 0
-    last_model = ""
-
-    try:
-        with open(jsonl_file, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    msg = json.loads(line)
-                    if msg.get("type") == "assistant":
-                        message = msg.get("message", {})
-                        model = message.get("model", "")
-                        if model:
-                            last_model = model
-
-                        usage = message.get("usage", {})
-                        total_input += usage.get("input_tokens", 0)
-                        total_output += usage.get("output_tokens", 0)
-                        total_cache_read += usage.get("cache_read_input_tokens", 0)
-                        total_cache_write += usage.get("cache_creation_input_tokens", 0)
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        return empty_result
-
-    # Calculate cost
-    cost = 0.0
-    if last_model in MODEL_PRICING:
-        input_price, output_price, cache_read_price, cache_write_price = MODEL_PRICING[last_model]
-        # Input tokens at input rate
-        cost += total_input * input_price / 1_000_000
-        # Output tokens at output rate
-        cost += total_output * output_price / 1_000_000
-        # Cache reads at reduced rate (0.1x input)
-        cost += total_cache_read * cache_read_price / 1_000_000
-        # Cache writes at premium rate (1.25x input)
-        cost += total_cache_write * cache_write_price / 1_000_000
-    elif last_model:
-        log(f"Warning: Unknown model '{last_model}', cost calculation skipped")
-
-    # Calculate simple cost (without cache benefits - what it would cost without caching)
-    simple_cost = 0.0
-    if last_model in MODEL_PRICING:
-        input_price, output_price, _, _ = MODEL_PRICING[last_model]
-        simple_cost = total_input * input_price / 1_000_000 + total_output * output_price / 1_000_000
-
-    return {
-        "input": total_input,
-        "output": total_output,
-        "cache_read": total_cache_read,
-        "cache_write": total_cache_write,
-        "cost": cost,
-        "simple_cost": simple_cost,
-    }
 
 
 def format_tokens(count: int) -> str:
@@ -1012,7 +854,6 @@ def cmd_start():
     state["project"] = project_name
     state["project_path"] = project
     state["git_branch"] = get_git_branch(project) if project else ""
-    state["model"] = get_model_from_jsonl()
     state["last_update"] = now
     state["tool"] = ""
 
@@ -1020,9 +861,7 @@ def cmd_start():
     session_id = hook_input.get("session_id", "")
     state["session_id"] = session_id
 
-    # Initialize token tracking
-    tokens = get_session_tokens_and_cost(session_id)
-    state["tokens"] = tokens
+    # Note: model and tokens are populated by statusline.py
 
     write_state(state)
 
@@ -1096,16 +935,7 @@ def cmd_update():
         elif tool_name not in FILE_TOOLS:
             state["file"] = ""
 
-    # Refresh token counts only if using JSONL data source
-    # When using statusline, tokens are updated by statusline.py (no overhead here)
-    data_source = config.get("data_source", "statusline")
-    if data_source == "jsonl":
-        show_tokens = config.get("display", {}).get("show_tokens", True)
-        show_cost = config.get("display", {}).get("show_cost", True)
-        if show_tokens or show_cost:
-            session_id = state.get("session_id", "")
-            tokens = get_session_tokens_and_cost(session_id)
-            state["tokens"] = tokens
+    # Note: tokens are updated by statusline.py (no JSONL parsing needed)
 
     write_state(state)
 
