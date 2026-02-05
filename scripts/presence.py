@@ -40,22 +40,6 @@ SESSIONS_FILE = DATA_DIR / "sessions.json"  # Tracks active session PIDs
 # Orphan check interval (seconds) - how often daemon checks for dead sessions
 ORPHAN_CHECK_INTERVAL = 30
 
-# Claude Code directories
-CLAUDE_DIR = Path.home() / ".claude"
-
-# Model display names
-MODEL_DISPLAY = {
-    # Claude 4.5 series
-    "claude-opus-4-5-20251101": "Opus 4.5",
-    "claude-sonnet-4-5-20250514": "Sonnet 4.5",
-    "claude-sonnet-4-5-20241022": "Sonnet 4.5",
-    "claude-haiku-4-5-20250414": "Haiku 4.5",
-    "claude-haiku-4-5-20241022": "Haiku 4.5",
-    # Claude 4 series
-    "claude-opus-4-20250514": "Opus 4",
-    "claude-sonnet-4-20250514": "Sonnet 4",
-}
-
 # Tool to display name mapping (keep short for Discord limit)
 TOOL_DISPLAY = {
     # File operations
@@ -586,19 +570,6 @@ def cleanup_dead_sessions() -> int:
         write_sessions(alive_sessions)
 
     return len(alive_sessions)
-
-
-def format_model_name(model_id: str) -> str:
-    """Convert model ID to display name."""
-    if model_id in MODEL_DISPLAY:
-        return MODEL_DISPLAY[model_id]
-    if "opus" in model_id.lower():
-        return "Opus"
-    if "sonnet" in model_id.lower():
-        return "Sonnet"
-    if "haiku" in model_id.lower():
-        return "Haiku"
-    return ""
 
 
 def format_tokens(count: int) -> str:
