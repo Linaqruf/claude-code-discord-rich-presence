@@ -15,6 +15,19 @@ import signal
 from pathlib import Path
 from datetime import datetime
 
+# Shared state management (provides process-safe file locking)
+from state import (
+    DATA_DIR,
+    STATE_FILE,
+    StateLock,
+    read_state,
+    write_state,
+    update_state,
+    clear_state,
+    read_state_unlocked,
+    write_state_unlocked,
+)
+
 # Optional YAML support for config file
 try:
     import yaml
@@ -28,17 +41,7 @@ _yaml_warning_logged = False
 # Discord Application ID
 DISCORD_APP_ID = "1330919293709324449"
 
-# Data directory
-if sys.platform == "win32":
-    _appdata = os.environ.get("APPDATA")
-    if _appdata:
-        DATA_DIR = Path(_appdata) / "cc-discord-rpc"
-    else:
-        DATA_DIR = Path.home() / ".cc-discord-rpc"
-else:
-    DATA_DIR = Path.home() / ".local" / "share" / "cc-discord-rpc"
-
-STATE_FILE = DATA_DIR / "state.json"
+# Data files (DATA_DIR imported from state module)
 PID_FILE = DATA_DIR / "daemon.pid"
 LOG_FILE = DATA_DIR / "daemon.log"
 SESSIONS_FILE = DATA_DIR / "sessions.json"  # Tracks active session PIDs
@@ -262,41 +265,8 @@ def truncate_filename(filename: str, max_length: int = 25) -> str:
     return stem[:half] + "..." + stem[-half:] + suffix
 
 
-def read_state() -> dict:
-    """Read current state from state file."""
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
-            log(f"Warning: Could not read state file: {e}")
-    return {}
-
-
-def write_state(state: dict):
-    """Write state to state file using atomic write pattern."""
-    import shutil
-    import tempfile
-    try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        content = json.dumps(state, indent=2)
-
-        # Write to temp file first, then atomic rename
-        fd, tmp_path = tempfile.mkstemp(dir=DATA_DIR, suffix='.tmp')
-        try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                f.write(content)
-            # shutil.move handles cross-platform atomic rename (including Windows overwrite)
-            shutil.move(tmp_path, STATE_FILE)
-        except (OSError, IOError) as e:
-            # Clean up temp file on failure
-            log(f"Warning: Failed to write state file: {e}")
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-    except OSError as e:
-        log(f"Warning: Could not write state: {e}")
+# Note: read_state, write_state, update_state, clear_state are imported from state module
+# which provides process-safe file locking to prevent race conditions
 
 
 def get_daemon_pid() -> int | None:
@@ -855,27 +825,27 @@ def cmd_start():
     claude_pid = get_session_pid()
     session_count = add_session(claude_pid)
 
-    # Update state
-    state = read_state()
+    # Update state with file locking to prevent race conditions
     now = int(time.time())
-
-    # Reset session_start if this is the first/only session (timer starts fresh)
-    if session_count == 1:
-        state["session_start"] = now
-
-    state["project"] = project_name
-    state["project_path"] = project
-    state["git_branch"] = get_git_branch(project) if project else ""
-    state["last_update"] = now
-    state["tool"] = ""
-
-    # Get session ID from hook input if available
+    git_branch = get_git_branch(project) if project else ""
     session_id = hook_input.get("session_id", "")
-    state["session_id"] = session_id
 
-    # Note: model and tokens are populated by statusline.py
+    with StateLock():
+        state = read_state_unlocked()
 
-    write_state(state)
+        # Reset session_start if this is the first/only session (timer starts fresh)
+        if session_count == 1:
+            state["session_start"] = now
+
+        state["project"] = project_name
+        state["project_path"] = project
+        state["git_branch"] = git_branch
+        state["last_update"] = now
+        state["tool"] = ""
+        state["session_id"] = session_id
+        # Note: model and tokens are populated by statusline.py
+
+        write_state_unlocked(state)
 
     log(f"Session started for PID {claude_pid} (active sessions: {session_count})")
 
@@ -928,28 +898,31 @@ def cmd_update():
     hook_input = read_hook_input()
     tool_name = hook_input.get("tool_name", "")
 
-    state = read_state()
-    if not state:
-        # No active session, ignore
-        return
-
-    state["tool"] = tool_name
-    state["last_update"] = int(time.time())
-
-    # Extract and store filename only if show_file is enabled (saves overhead)
+    # Extract filename outside lock to minimize lock time
     config = get_config()
     show_file = config.get("display", {}).get("show_file", False)
     filename = ""
     if show_file:
         filename = extract_file_from_tool_input(hook_input)
-        if filename:
-            state["file"] = filename
-        elif tool_name not in FILE_TOOLS:
-            state["file"] = ""
 
-    # Note: tokens are updated by statusline.py (no JSONL parsing needed)
+    # Update state with file locking to prevent race conditions
+    with StateLock():
+        state = read_state_unlocked()
+        if not state:
+            # No active session, ignore
+            return
 
-    write_state(state)
+        state["tool"] = tool_name
+        state["last_update"] = int(time.time())
+
+        if show_file:
+            if filename:
+                state["file"] = filename
+            elif tool_name not in FILE_TOOLS:
+                state["file"] = ""
+
+        # Note: tokens are updated by statusline.py (no JSONL parsing needed)
+        write_state_unlocked(state)
 
     log(f"Updated: {tool_name}" + (f" ({filename})" if filename else ""))
 
@@ -966,8 +939,8 @@ def cmd_stop():
 
     log("Last session ended, stopping daemon")
 
-    # Clear state
-    write_state({})
+    # Clear state (with locking)
+    clear_state(log)
 
     # Kill daemon if running
     pid = get_daemon_pid()

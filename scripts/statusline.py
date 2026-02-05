@@ -19,9 +19,15 @@ import os
 from pathlib import Path
 from datetime import datetime
 
+# Shared state management (provides process-safe file locking)
+from state import StateLock, read_state_unlocked, write_state_unlocked
+
 # Fix Windows console encoding for Unicode characters
 if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding='utf-8')
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except (AttributeError, OSError):
+        pass  # Fall back to default encoding
 
 # ═══════════════════════════════════════════════════════════════
 # Apple System Colors (ANSI approximations)
@@ -108,57 +114,8 @@ def truncate(s: str, max_len: int) -> str:
     return s[:max_len - 1] + '…'
 
 
-# ═══════════════════════════════════════════════════════════════
-# State Management (for Discord RPC integration)
-# ═══════════════════════════════════════════════════════════════
-
-if sys.platform == "win32":
-    _appdata = os.environ.get("APPDATA")
-    if _appdata:
-        DATA_DIR = Path(_appdata) / "cc-discord-rpc"
-    else:
-        DATA_DIR = Path.home() / ".cc-discord-rpc"
-else:
-    DATA_DIR = Path.home() / ".local" / "share" / "cc-discord-rpc"
-
-STATE_FILE = DATA_DIR / "state.json"
-
-
-def read_state() -> dict:
-    """Read current state from state file"""
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
-            print(f"[statusline] Warning: Could not read state file: {e}", file=sys.stderr)
-    return {}
-
-
-def write_state(state: dict):
-    """Write state to state file using atomic write pattern"""
-    import shutil
-    import tempfile
-    try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        content = json.dumps(state, indent=2)
-
-        # Write to temp file first, then atomic rename
-        fd, tmp_path = tempfile.mkstemp(dir=DATA_DIR, suffix='.tmp')
-        try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                f.write(content)
-            # shutil.move handles cross-platform atomic rename (including Windows overwrite)
-            shutil.move(tmp_path, STATE_FILE)
-        except (OSError, IOError) as e:
-            # Clean up temp file on failure
-            print(f"[statusline] Failed to write state file: {e}", file=sys.stderr)
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-    except OSError as e:
-        print(f"[statusline] Error writing state: {e}", file=sys.stderr)
+# Note: State management (read_state, write_state, StateLock) imported from state module
+# which provides process-safe file locking to prevent race conditions
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -194,21 +151,26 @@ def main():
     cwd = data.get("workspace", {}).get("current_dir", os.getcwd())
     git_branch = get_git_branch(cwd)
 
-    # Update state.json for Discord RPC
-    state = read_state()
-    if state.get("session_start"):  # Only update if session exists
-        state["model"] = model
-        state["model_id"] = model_id
-        state["tokens"] = {
-            "input": total_input,
-            "output": total_output,
-            "cache_read": cache_read,
-            "cache_write": cache_write,
-            "cost": cost,
-            "simple_cost": cost,  # Claude Code provides pre-calculated cost, no separate calculation needed
-        }
-        state["statusline_update"] = int(datetime.now().timestamp())
-        write_state(state)
+    # Update state.json for Discord RPC (with file locking to prevent race conditions)
+    try:
+        with StateLock(timeout=1.0):  # Short timeout since statusline runs frequently
+            state = read_state_unlocked()
+            if state.get("session_start"):  # Only update if session exists
+                state["model"] = model
+                state["model_id"] = model_id
+                state["tokens"] = {
+                    "input": total_input,
+                    "output": total_output,
+                    "cache_read": cache_read,
+                    "cache_write": cache_write,
+                    "cost": cost,
+                    "simple_cost": cost,  # Claude Code provides pre-calculated cost
+                }
+                state["statusline_update"] = int(datetime.now().timestamp())
+                write_state_unlocked(state)
+    except (OSError, TimeoutError) as e:
+        # Don't fail statusline display if state update fails
+        print(f"[statusline] Warning: Could not update state: {e}", file=sys.stderr)
 
     # ─────────────────────────────────────────────────────────────
     # Build Apple Finder Path Bar Statusline
