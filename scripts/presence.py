@@ -226,7 +226,8 @@ def extract_file_from_tool_input(hook_input: dict) -> str:
 
     try:
         return Path(file_path).name
-    except Exception:
+    except (ValueError, OSError, TypeError) as e:
+        log(f"Warning: Could not extract filename from '{file_path}': {e}")
         return ""
 
 
@@ -635,8 +636,8 @@ def run_daemon():
                 try:
                     rpc.clear()
                     rpc.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log(f"Warning: Error during RPC disconnect before reconnect: {e}")
                 connected = False
                 rpc = None
                 current_app_id = new_app_id
@@ -790,8 +791,14 @@ def run_daemon():
 
         except KeyboardInterrupt:
             break
+        except (OSError, IOError, ConnectionError, BrokenPipeError) as e:
+            # Expected transient errors - log and continue
+            log(f"Daemon error (recoverable): {e}")
+            time.sleep(5)
         except Exception as e:
-            log(f"Daemon error: {e}")
+            # Unexpected errors - log full traceback for debugging
+            import traceback
+            log(f"Daemon error (unexpected): {e}\n{traceback.format_exc()}")
             time.sleep(5)
 
     # Cleanup
@@ -799,8 +806,8 @@ def run_daemon():
         try:
             rpc.clear()
             rpc.close()
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"Warning: Error during RPC cleanup on shutdown: {e}")
     log("Daemon stopped")
 
 
