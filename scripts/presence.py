@@ -234,17 +234,24 @@ def extract_file_from_tool_input(hook_input: dict) -> str:
         ...
     }
 
+    For NotebookEdit/NotebookRead tools, tool_input contains:
+    {
+        "notebook_path": "/path/to/notebook.ipynb",
+        ...
+    }
+
     Returns just the filename (not full path), or empty string if not available.
     """
     tool_name = hook_input.get("tool_name", "")
     if tool_name not in FILE_TOOLS:
         return ""
 
-    tool_input = hook_input.get("tool_input", {})
+    tool_input = hook_input.get("tool_input")
     if not isinstance(tool_input, dict):
         return ""
 
-    file_path = tool_input.get("file_path", "")
+    # Check file_path (Edit/Write/Read) or notebook_path (NotebookEdit/NotebookRead)
+    file_path = tool_input.get("file_path", "") or tool_input.get("notebook_path", "")
     if not file_path:
         return ""
 
@@ -637,7 +644,8 @@ def run_daemon():
                 try:
                     rpc.clear()
                     rpc.close()
-                except Exception as e:
+                except (ConnectionError, ConnectionResetError, BrokenPipeError,
+                        TimeoutError, OSError) as e:
                     log(f"Warning: Error during RPC disconnect before reconnect: {e}")
                 connected = False
                 rpc = None
@@ -676,8 +684,8 @@ def run_daemon():
                     log(f"FATAL: Unexpected error connecting to Discord: {e}\n{traceback.format_exc()}")
                     break
 
-            # Read current state
-            state = read_state()
+            # Read current state (pass logger for error visibility)
+            state = read_state(log)
 
             if not state:
                 time.sleep(1)
@@ -930,23 +938,27 @@ def cmd_update():
         filename = extract_file_from_tool_input(hook_input)
 
     # Update state with file locking to prevent race conditions
-    with StateLock():
-        state = read_state_unlocked()
-        if not state:
-            # No active session, ignore
-            return
+    try:
+        with StateLock():
+            state = read_state_unlocked()
+            if not state:
+                # No active session, ignore
+                return
 
-        state["tool"] = tool_name
-        state["last_update"] = int(time.time())
+            state["tool"] = tool_name
+            state["last_update"] = int(time.time())
 
-        if show_file:
-            if filename:
-                state["file"] = filename
-            elif tool_name not in FILE_TOOLS:
-                state["file"] = ""
+            if show_file:
+                if filename:
+                    state["file"] = filename
+                elif tool_name not in FILE_TOOLS:
+                    state["file"] = ""
 
-        # Note: tokens are updated by statusline.py (no JSONL parsing needed)
-        write_state_unlocked(state)
+            # Note: tokens are updated by statusline.py (no JSONL parsing needed)
+            write_state_unlocked(state)
+    except (OSError, TimeoutError) as e:
+        log(f"Warning: Could not update session state: {e}")
+        return
 
     log(f"Updated: {tool_name}" + (f" ({filename})" if filename else ""))
 
