@@ -19,8 +19,8 @@ import os
 from pathlib import Path
 from datetime import datetime
 
-# Shared state management (provides process-safe file locking)
-from state import StateLock, read_state_unlocked, write_state_unlocked
+# Shared state management (provides process-safe file locking and utilities)
+from state import StateLock, read_state_unlocked, write_state_unlocked, format_tokens
 
 # Fix Windows console encoding for Unicode characters
 if sys.platform == "win32":
@@ -52,17 +52,6 @@ class C:
 # ═══════════════════════════════════════════════════════════════
 # Helpers
 # ═══════════════════════════════════════════════════════════════
-
-def format_tokens(count: int) -> str:
-    """Format token count (e.g., 29.4k, 1.2M)"""
-    if count >= 1_000_000:
-        return f"{count / 1_000_000:.1f}M"
-    if count >= 100_000:
-        return f"{count / 1_000:.0f}k"
-    if count >= 1_000:
-        return f"{count / 1_000:.1f}k"
-    return f"{count:,}"
-
 
 def format_cost(cost: float) -> str:
     """Format cost with appropriate precision"""

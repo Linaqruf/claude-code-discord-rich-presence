@@ -4,6 +4,7 @@ Discord Rich Presence for Claude Code
 Manages Discord RPC connection and updates presence based on Claude Code activity.
 """
 
+import copy
 import sys
 import os
 import json
@@ -26,6 +27,7 @@ from state import (
     clear_state,
     read_state_unlocked,
     write_state_unlocked,
+    format_tokens,
 )
 
 # Optional YAML support for config file
@@ -211,7 +213,7 @@ _config_last_load = 0
 def get_config(force_reload: bool = False) -> dict:
     """Get cached config, reloading periodically for hot-reload support.
 
-    Returns a copy of the cached config to prevent accidental mutation.
+    Returns a deep copy of the cached config to prevent accidental mutation.
     """
     global _config_cache, _config_last_load
 
@@ -220,10 +222,7 @@ def get_config(force_reload: bool = False) -> dict:
         _config_cache = load_config()
         _config_last_load = now
 
-    # Return a copy to prevent accidental mutation of cached config
-    config_copy = _config_cache.copy()
-    config_copy["display"] = _config_cache["display"].copy()
-    return config_copy
+    return copy.deepcopy(_config_cache)
 
 
 def extract_file_from_tool_input(hook_input: dict) -> str:
@@ -578,15 +577,6 @@ def cleanup_dead_sessions() -> int:
     return len(alive_sessions)
 
 
-def format_tokens(count: int) -> str:
-    """Format token count for display (e.g., 12.5k, 1.2M)."""
-    if count >= 1_000_000:
-        return f"{count / 1_000_000:.1f}M"
-    elif count >= 1000:
-        return f"{count / 1000:.1f}k"
-    return str(count)
-
-
 def read_hook_input() -> dict:
     """Read JSON input from stdin (provided by Claude Code hooks)."""
     try:
@@ -726,16 +716,15 @@ def run_daemon():
             # Determine activity - show "Idling" if idle timeout reached
             if is_idle:
                 activity = "Idling"
-                display_file = ""  # Don't show file when idling
             elif tool in TOOL_DISPLAY:
                 activity = TOOL_DISPLAY[tool]
-                display_file = current_file if tool in FILE_TOOLS else ""
             elif tool.startswith("mcp__"):
                 activity = "Using MCP"
-                display_file = ""
             else:
                 activity = "Working"
-                display_file = ""
+
+            # Only show file for non-idle file operations
+            display_file = current_file if not is_idle and tool in FILE_TOOLS else ""
 
             # Build activity string with optional filename
             if display_file:  # show_file already checked when setting display_file

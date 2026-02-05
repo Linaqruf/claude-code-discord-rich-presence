@@ -5,7 +5,9 @@ Provides process-safe state file operations with cross-platform file locking.
 
 import json
 import os
+import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -30,6 +32,24 @@ else:
 
 STATE_FILE = DATA_DIR / "state.json"
 LOCK_FILE = DATA_DIR / "state.lock"
+
+
+# ═══════════════════════════════════════════════════════════════
+# Shared Utilities
+# ═══════════════════════════════════════════════════════════════
+
+def format_tokens(count: int) -> str:
+    """Format token count for display (e.g., 12.5k, 1.2M).
+
+    Shared utility used by both presence.py and statusline.py.
+    """
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 100_000:
+        return f"{count / 1_000:.0f}k"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}k"
+    return f"{count:,}"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -132,9 +152,6 @@ def write_state_unlocked(state: dict):
     Write state to state file using atomic write pattern (no locking).
     Use write_state() or wrap with StateLock for safe access.
     """
-    import shutil
-    import tempfile
-
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     content = json.dumps(state, indent=2)
 
