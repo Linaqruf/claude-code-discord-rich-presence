@@ -95,7 +95,8 @@ def get_git_branch(cwd: str) -> str | None:
             head = git_head.read_text().strip()
             if head.startswith('ref: refs/heads/'):
                 return head.replace('ref: refs/heads/', '')
-    except Exception:
+    except (OSError, UnicodeDecodeError):
+        # Git branch detection is optional, fail silently
         pass
     return None
 
@@ -124,13 +125,14 @@ def read_state() -> dict:
     if STATE_FILE.exists():
         try:
             return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            pass
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            print(f"[statusline] Warning: Could not read state file: {e}", file=sys.stderr)
     return {}
 
 
 def write_state(state: dict):
     """Write state to state file using atomic write pattern"""
+    import shutil
     import tempfile
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -141,12 +143,11 @@ def write_state(state: dict):
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 f.write(content)
-            # On Windows, need to remove target first for rename
-            if sys.platform == "win32" and STATE_FILE.exists():
-                STATE_FILE.unlink()
-            os.rename(tmp_path, STATE_FILE)
-        except Exception:
+            # shutil.move handles cross-platform atomic rename (including Windows overwrite)
+            shutil.move(tmp_path, STATE_FILE)
+        except (OSError, IOError) as e:
             # Clean up temp file on failure
+            print(f"[statusline] Failed to write state file: {e}", file=sys.stderr)
             try:
                 os.unlink(tmp_path)
             except OSError:
@@ -164,7 +165,8 @@ def main():
     # Read JSON from stdin
     try:
         data = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError, OSError) as e:
+        print(f"[statusline] Error reading input: {e}", file=sys.stderr)
         print("")
         return
 

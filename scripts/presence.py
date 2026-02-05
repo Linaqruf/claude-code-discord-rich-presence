@@ -160,13 +160,13 @@ def load_config() -> dict:
                 if key in user_config["display"]:
                     config["display"][key] = bool(user_config["display"][key])
 
-        # Merge idle_timeout
+        # Merge idle_timeout (1 second to 24 hours)
         if "idle_timeout" in user_config:
             timeout = user_config["idle_timeout"]
-            if isinstance(timeout, (int, float)) and timeout > 0:
+            if isinstance(timeout, (int, float)) and 0 < timeout <= 86400:
                 config["idle_timeout"] = int(timeout)
             else:
-                log(f"Warning: Invalid idle_timeout '{timeout}', using default")
+                log(f"Warning: idle_timeout must be 1-86400 seconds, got '{timeout}', using default")
 
         log(f"Loaded config from {config_path}")
 
@@ -251,6 +251,10 @@ def truncate_filename(filename: str, max_length: int = 25) -> str:
         # Very long extension, just truncate from end
         return filename[:max_length - 3] + "..."
 
+    # If stem fits in available space, no truncation needed
+    if len(stem) <= available:
+        return filename[:max_length - 3] + "..."
+
     # Keep start and end of stem
     half = available // 2
     return stem[:half] + "..." + stem[-half:] + suffix
@@ -261,13 +265,14 @@ def read_state() -> dict:
     if STATE_FILE.exists():
         try:
             return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            pass
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            log(f"Warning: Could not read state file: {e}")
     return {}
 
 
 def write_state(state: dict):
     """Write state to state file using atomic write pattern."""
+    import shutil
     import tempfile
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -278,12 +283,11 @@ def write_state(state: dict):
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 f.write(content)
-            # On Windows, need to remove target first for rename
-            if sys.platform == "win32" and STATE_FILE.exists():
-                STATE_FILE.unlink()
-            os.rename(tmp_path, STATE_FILE)
-        except Exception:
+            # shutil.move handles cross-platform atomic rename (including Windows overwrite)
+            shutil.move(tmp_path, STATE_FILE)
+        except (OSError, IOError) as e:
             # Clean up temp file on failure
+            log(f"Warning: Failed to write state file: {e}")
             try:
                 os.unlink(tmp_path)
             except OSError:
@@ -509,8 +513,8 @@ def read_sessions() -> dict:
     if SESSIONS_FILE.exists():
         try:
             return json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            log(f"Warning: Could not read sessions file: {e}")
     return {}
 
 
@@ -589,8 +593,8 @@ def read_hook_input() -> dict:
             data = sys.stdin.read()
             if data.strip():
                 return json.loads(data)
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        pass
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        log(f"Warning: Could not parse hook input: {e}")
     return {}
 
 
@@ -945,7 +949,7 @@ def cmd_stop():
             else:
                 os.kill(pid, signal.SIGTERM)
             log(f"Stopped daemon (PID {pid})")
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError) as e:
             log(f"Failed to stop daemon: {e}")
 
     remove_pid()
