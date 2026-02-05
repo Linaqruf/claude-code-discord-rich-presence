@@ -113,7 +113,11 @@ def truncate(s: str, max_len: int) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 if sys.platform == "win32":
-    DATA_DIR = Path(os.environ.get("APPDATA", "")) / "cc-discord-rpc"
+    _appdata = os.environ.get("APPDATA")
+    if _appdata:
+        DATA_DIR = Path(_appdata) / "cc-discord-rpc"
+    else:
+        DATA_DIR = Path.home() / ".cc-discord-rpc"
 else:
     DATA_DIR = Path.home() / ".local" / "share" / "cc-discord-rpc"
 
@@ -201,7 +205,7 @@ def main():
             "cache_read": cache_read,
             "cache_write": cache_write,
             "cost": cost,
-            "simple_cost": cost,  # Use actual cost (statusline doesn't have model-specific pricing)
+            "simple_cost": cost,  # Claude Code provides pre-calculated cost, no separate calculation needed
         }
         state["statusline_update"] = int(datetime.now().timestamp())
         write_state(state)

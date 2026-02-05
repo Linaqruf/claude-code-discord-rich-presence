@@ -21,14 +21,20 @@ try:
     YAML_AVAILABLE = True
 except ImportError:
     YAML_AVAILABLE = False
-    _yaml_warning_logged = False
+
+# Track if YAML warning has been logged (always defined at module level)
+_yaml_warning_logged = False
 
 # Discord Application ID
 DISCORD_APP_ID = "1330919293709324449"
 
 # Data directory
 if sys.platform == "win32":
-    DATA_DIR = Path(os.environ.get("APPDATA", "")) / "cc-discord-rpc"
+    _appdata = os.environ.get("APPDATA")
+    if _appdata:
+        DATA_DIR = Path(_appdata) / "cc-discord-rpc"
+    else:
+        DATA_DIR = Path.home() / ".cc-discord-rpc"
 else:
     DATA_DIR = Path.home() / ".local" / "share" / "cc-discord-rpc"
 
@@ -66,8 +72,8 @@ TOOL_DISPLAY = {
     "mcp": "Using MCP",
 }
 
-# Idle timeout in seconds (5 minutes) - after this, show "Idling" instead of last activity
-IDLE_TIMEOUT = 5 * 60
+# Default idle timeout - used as fallback when config cannot be loaded
+IDLE_TIMEOUT = 5 * 60  # 5 minutes
 
 # Configuration
 CONFIG_FILE_NAME = "config.yaml"
@@ -78,7 +84,7 @@ DEFAULT_CONFIG = {
         "show_cost": True,
         "show_model": True,
         "show_branch": True,
-        "show_file": False,  # Disabled by default (minor performance overhead)
+        "show_file": False,  # Disabled by default - requires parsing tool_input on each hook call
     },
     "idle_timeout": 300,  # 5 minutes in seconds
 }
@@ -237,7 +243,7 @@ def truncate_filename(filename: str, max_length: int = 25) -> str:
     If filename exceeds max_length, keeps the start and end of the stem with '...'
     in the middle, preserving the file extension.
 
-    Example: 'very_long_filename_here.py' -> 'very_lo...e_here.py'
+    Example: 'very_long_component_name.tsx' (28 chars) -> 'very_long...t_name.tsx' (22 chars)
     """
     if len(filename) <= max_length:
         return filename
@@ -249,10 +255,6 @@ def truncate_filename(filename: str, max_length: int = 25) -> str:
     available = max_length - len(suffix) - 3  # 3 for '...'
     if available < 5:
         # Very long extension, just truncate from end
-        return filename[:max_length - 3] + "..."
-
-    # If stem fits in available space, no truncation needed
-    if len(stem) <= available:
         return filename[:max_length - 3] + "..."
 
     # Keep start and end of stem
@@ -302,7 +304,8 @@ def get_daemon_pid() -> int | None:
     if not PID_FILE.exists():
         return None
     try:
-        pid = int(PID_FILE.read_text().strip())
+        pid_content = PID_FILE.read_text().strip()
+        pid = int(pid_content)
         # Check if process is actually running
         if sys.platform == "win32":
             result = subprocess.run(
@@ -314,8 +317,16 @@ def get_daemon_pid() -> int | None:
         else:
             os.kill(pid, 0)  # Doesn't kill, just checks
             return pid
-    except (ValueError, ProcessLookupError, PermissionError, OSError):
-        pass
+    except ValueError as e:
+        log(f"Warning: Corrupt PID file content '{pid_content}', removing: {e}")
+        try:
+            PID_FILE.unlink()
+        except OSError:
+            pass
+    except ProcessLookupError:
+        pass  # Process not running - normal case
+    except (PermissionError, OSError) as e:
+        log(f"Warning: Could not check daemon PID: {e}")
     return None
 
 
@@ -332,8 +343,10 @@ def remove_pid():
     """Remove PID file."""
     try:
         PID_FILE.unlink()
-    except OSError:
-        pass
+    except FileNotFoundError:
+        pass  # Already gone, no problem
+    except OSError as e:
+        log(f"Warning: Could not remove PID file: {e}")
 
 
 def get_project_name(project_path: str = "") -> str:
@@ -528,8 +541,10 @@ def write_sessions(sessions: dict):
     if not sessions:
         try:
             SESSIONS_FILE.unlink()
-        except OSError:
-            pass
+        except FileNotFoundError:
+            pass  # Already gone, no problem
+        except OSError as e:
+            log(f"Warning: Could not remove sessions file: {e}")
     else:
         try:
             SESSIONS_FILE.write_text(json.dumps(sessions), encoding="utf-8")
@@ -606,6 +621,10 @@ def run_daemon():
     write_pid()
     atexit.register(remove_pid)
 
+    # Log YAML availability on startup for easier debugging
+    if not YAML_AVAILABLE:
+        log("Info: PyYAML not installed - config.yaml support disabled. Install with: pip install pyyaml")
+
     # Load initial config
     config = get_config(force_reload=True)
     app_id = config.get("discord_app_id") or DISCORD_APP_ID
@@ -627,6 +646,8 @@ def run_daemon():
     last_sent = {}  # Track last sent state to avoid redundant updates
     last_orphan_check = 0  # Track when we last checked for dead sessions
     discord_connect_attempts = 0  # Track connection retry attempts
+    consecutive_errors = 0  # Track consecutive loop errors for circuit breaker
+    MAX_CONSECUTIVE_ERRORS = 10  # Exit after this many consecutive failures
 
     while True:
         try:
@@ -724,7 +745,7 @@ def run_daemon():
                 display_file = ""
 
             # Build activity string with optional filename
-            if display_file and show_file:
+            if display_file:  # show_file already checked when setting display_file
                 truncated_file = truncate_filename(display_file)
                 activity_str = f"{activity} {truncated_file}"
             else:
@@ -744,13 +765,13 @@ def run_daemon():
                     max_proj = 120 - len(activity_str) - 4
                     details = f"{activity_str} on {project[:max(10, max_proj)]}..."
 
-            # Cycle state line every 8s: 5s simple, 3s cached
+            # Cycle display between two views every 8 seconds:
+            # - Simple (5s): input + output tokens, cost without cache consideration
+            # - Cached (3s): total tokens including cache reads/writes
             cycle_pos = int(time.time()) % 8
-            show_simple = cycle_pos < 5  # 0-4 = simple (5s), 5-7 = cached (3s)
+            show_simple = cycle_pos < 5
 
-            # Simple = input + output only
             simple_tokens = input_tokens + output_tokens
-            # Cached = total including cache
             cached_tokens = input_tokens + output_tokens + cache_read + cache_write
 
             # Build state line with config toggles
@@ -795,15 +816,24 @@ def run_daemon():
 
         except KeyboardInterrupt:
             break
+        except SystemExit:
+            raise  # Allow intentional exits to propagate
         except (OSError, IOError, ConnectionError, BrokenPipeError) as e:
-            # Expected transient errors - log and continue
-            log(f"Daemon error (recoverable): {e}")
+            # Expected transient errors - log and continue with circuit breaker
+            consecutive_errors += 1
+            log(f"Daemon error (recoverable, {consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {e}")
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                log(f"ERROR: Too many consecutive errors ({consecutive_errors}), daemon exiting")
+                break
             time.sleep(5)
         except Exception as e:
-            # Unexpected errors - log full traceback for debugging
+            # Unexpected errors (programming bugs) - log and exit to avoid infinite loop
             import traceback
-            log(f"Daemon error (unexpected): {e}\n{traceback.format_exc()}")
-            time.sleep(5)
+            log(f"Daemon error (FATAL unexpected): {e}\n{traceback.format_exc()}")
+            break  # Exit on programming errors rather than infinite retry loop
+        else:
+            # Reset error counter on successful iteration
+            consecutive_errors = 0
 
     # Cleanup
     if rpc:
