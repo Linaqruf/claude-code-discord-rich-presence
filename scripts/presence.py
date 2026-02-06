@@ -292,22 +292,17 @@ def truncate_filename(filename: str, max_length: int = 25) -> str:
 
 
 def get_daemon_pid() -> int | None:
-    """Get PID of running daemon, or None if not running."""
+    """Get PID of running daemon, or None if not running.
+
+    Uses fast Windows API (OpenProcess) instead of slow tasklist command.
+    """
     if not PID_FILE.exists():
         return None
     try:
         pid_content = PID_FILE.read_text().strip()
         pid = int(pid_content)
-        # Check if process is actually running
-        if sys.platform == "win32":
-            result = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                capture_output=True, text=True
-            )
-            if str(pid) in result.stdout:
-                return pid
-        else:
-            os.kill(pid, 0)  # Doesn't kill, just checks
+        # Check if process is actually running using fast API
+        if is_process_alive(pid):
             return pid
     except ValueError as e:
         log(f"Warning: Corrupt PID file content '{pid_content}', removing: {e}")
@@ -315,8 +310,6 @@ def get_daemon_pid() -> int | None:
             PID_FILE.unlink()
         except OSError:
             pass
-    except ProcessLookupError:
-        pass  # Process not running - normal case
     except (PermissionError, OSError) as e:
         log(f"Warning: Could not check daemon PID: {e}")
     return None
@@ -585,15 +578,35 @@ def cleanup_dead_sessions() -> int:
 
 
 def read_hook_input() -> dict:
-    """Read JSON input from stdin (provided by Claude Code hooks)."""
-    try:
-        if not sys.stdin.isatty():
+    """Read JSON input from stdin (provided by Claude Code hooks).
+
+    Uses a thread with timeout to prevent deadlock if Claude Code
+    keeps stdin open while waiting for stdout (pipe deadlock).
+    """
+    if sys.stdin.isatty():
+        return {}
+
+    import threading
+
+    result = {}
+
+    def _read_stdin():
+        nonlocal result
+        try:
             data = sys.stdin.read()
-            if data.strip():
-                return json.loads(data)
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
-        log(f"Warning: Could not parse hook input: {e}")
-    return {}
+            if data and data.strip():
+                result = json.loads(data)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            log(f"Warning: Could not parse hook input: {e}")
+
+    reader = threading.Thread(target=_read_stdin, daemon=True)
+    reader.start()
+    reader.join(timeout=3)  # 3 second hard timeout for stdin
+
+    if reader.is_alive():
+        log("Warning: stdin read timed out after 3s (possible pipe deadlock)")
+
+    return result
 
 
 def run_daemon():
@@ -897,7 +910,8 @@ def cmd_start():
         try:
             proc = subprocess.Popen(
                 [python_exe, str(script_path), "daemon"],
-                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1052,19 +1066,33 @@ def main():
 
     command = sys.argv[1]
 
-    if command == "start":
-        cmd_start()
-    elif command == "update":
-        cmd_update()
-    elif command == "stop":
-        cmd_stop()
-    elif command == "status":
-        cmd_status()
-    elif command == "daemon":
-        run_daemon()
-    else:
-        print(f"Unknown command: {command}")
-        sys.exit(1)
+    # Hard timeout for hook commands to guarantee we never hang Claude Code.
+    # If anything (stdin, git, file lock, tasklist) hangs, this kills the process.
+    import threading
+    timer = None
+    if command in ("start", "update", "stop"):
+        timeout = 8 if command == "start" else 4  # Leave margin before hook timeout
+        timer = threading.Timer(timeout, lambda: os._exit(0))
+        timer.daemon = True
+        timer.start()
+
+    try:
+        if command == "start":
+            cmd_start()
+        elif command == "update":
+            cmd_update()
+        elif command == "stop":
+            cmd_stop()
+        elif command == "status":
+            cmd_status()
+        elif command == "daemon":
+            run_daemon()
+        else:
+            print(f"Unknown command: {command}")
+            sys.exit(1)
+    finally:
+        if timer is not None:
+            timer.cancel()
 
 
 if __name__ == "__main__":
