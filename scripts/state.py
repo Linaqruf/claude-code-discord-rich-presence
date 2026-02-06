@@ -32,6 +32,7 @@ else:
 
 STATE_FILE = DATA_DIR / "state.json"
 LOCK_FILE = DATA_DIR / "state.lock"
+SESSIONS_LOCK_FILE = DATA_DIR / "sessions.lock"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -56,21 +57,17 @@ def format_tokens(count: int) -> str:
 # File Locking
 # ═══════════════════════════════════════════════════════════════
 
-class StateLock:
+class FileLock:
     """
-    Cross-platform file lock for state operations.
+    Cross-platform file lock for process-safe operations.
 
     Usage:
-        with StateLock():
-            state = read_state_unlocked()
-            state["key"] = "value"
-            write_state_unlocked(state)
-
-    Note: Use the _unlocked variants inside StateLock context.
-    The locking variants (read_state, write_state) acquire their own locks.
+        with FileLock(lock_path):
+            # critical section
     """
 
-    def __init__(self, timeout: float = 5.0):
+    def __init__(self, lock_path: Path, timeout: float = 5.0):
+        self.lock_path = lock_path
         self.timeout = timeout
         self._lock_fd = None
 
@@ -81,7 +78,7 @@ class StateLock:
         while True:
             try:
                 # Open lock file (create if doesn't exist)
-                self._lock_fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_RDWR)
+                self._lock_fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR)
 
                 if sys.platform == "win32":
                     # Windows: lock first byte exclusively
@@ -102,7 +99,7 @@ class StateLock:
                     self._lock_fd = None
 
                 if time.time() - start > self.timeout:
-                    raise TimeoutError(f"Could not acquire state lock within {self.timeout}s")
+                    raise TimeoutError(f"Could not acquire lock {self.lock_path.name} within {self.timeout}s")
 
                 time.sleep(0.01)  # 10ms retry interval
 
@@ -114,8 +111,7 @@ class StateLock:
                 else:
                     fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
             except (OSError, IOError) as e:
-                # Log unlock failures - can cause future lock timeouts
-                print(f"[state] Warning: Failed to unlock state file: {e}", file=sys.stderr)
+                print(f"[state] Warning: Failed to unlock {self.lock_path.name}: {e}", file=sys.stderr)
             finally:
                 try:
                     os.close(self._lock_fd)
@@ -123,6 +119,30 @@ class StateLock:
                     pass
                 self._lock_fd = None
         return False
+
+
+class StateLock(FileLock):
+    """File lock for state.json operations.
+
+    Usage:
+        with StateLock():
+            state = read_state_unlocked()
+            state["key"] = "value"
+            write_state_unlocked(state)
+
+    Note: Use the _unlocked variants inside StateLock context.
+    The locking variants (read_state, write_state) acquire their own locks.
+    """
+
+    def __init__(self, timeout: float = 5.0):
+        super().__init__(LOCK_FILE, timeout)
+
+
+class SessionsLock(FileLock):
+    """File lock for sessions.json operations."""
+
+    def __init__(self, timeout: float = 5.0):
+        super().__init__(SESSIONS_LOCK_FILE, timeout)
 
 
 # ═══════════════════════════════════════════════════════════════

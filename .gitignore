@@ -18,6 +18,13 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+nul
 
 # Plugin local settings
 .claude/*.local.md
+
+# Project spec (generated)
+SPEC.md
+SPEC/
+CLAUDE.md
+prompt.md

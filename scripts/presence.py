@@ -21,6 +21,7 @@ from state import (
     DATA_DIR,
     STATE_FILE,
     StateLock,
+    SessionsLock,
     read_state,
     write_state,
     update_state,
@@ -190,7 +191,7 @@ def load_config() -> dict:
         # Merge idle_timeout (1 second to 24 hours)
         if "idle_timeout" in user_config:
             timeout = user_config["idle_timeout"]
-            if isinstance(timeout, (int, float)) and 0 < timeout <= 86400:
+            if isinstance(timeout, (int, float)) and int(timeout) >= 1 and int(timeout) <= 86400:
                 config["idle_timeout"] = int(timeout)
             else:
                 log(f"Warning: idle_timeout must be 1-86400 seconds, got '{timeout}', using default")
@@ -400,7 +401,7 @@ def is_process_alive(pid: int) -> bool:
     """Check if a process with given PID is still running."""
     if sys.platform == "win32":
         import ctypes
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
         # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         handle = kernel32.OpenProcess(0x1000, False, pid)
         if handle:
@@ -513,8 +514,8 @@ def get_session_pid() -> int:
     return fallback
 
 
-def read_sessions() -> dict:
-    """Read active sessions {pid: timestamp}."""
+def _read_sessions_unlocked() -> dict:
+    """Read active sessions {pid: timestamp} without locking."""
     if SESSIONS_FILE.exists():
         try:
             return json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
@@ -523,8 +524,8 @@ def read_sessions() -> dict:
     return {}
 
 
-def write_sessions(sessions: dict):
-    """Write active sessions to file."""
+def _write_sessions_unlocked(sessions: dict):
+    """Write active sessions to file without locking."""
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -544,44 +545,69 @@ def write_sessions(sessions: dict):
             log(f"Warning: Could not write sessions: {e}")
 
 
+def read_sessions() -> dict:
+    """Read active sessions {pid: timestamp} with locking."""
+    try:
+        with SessionsLock():
+            return _read_sessions_unlocked()
+    except (OSError, TimeoutError) as e:
+        log(f"Warning: Could not lock sessions for read: {e}")
+        return {}
+
+
 def add_session(pid: int):
-    """Register a new session by its parent PID."""
-    sessions = read_sessions()
-    sessions[str(pid)] = int(time.time())
-    write_sessions(sessions)
-    return len(sessions)
+    """Register a new session by its parent PID (with locking)."""
+    try:
+        with SessionsLock():
+            sessions = _read_sessions_unlocked()
+            sessions[str(pid)] = int(time.time())
+            _write_sessions_unlocked(sessions)
+            return len(sessions)
+    except (OSError, TimeoutError) as e:
+        log(f"Warning: Could not lock sessions for add: {e}")
+        return 0
 
 
 def remove_session(pid: int):
-    """Unregister a session by its parent PID."""
-    sessions = read_sessions()
-    sessions.pop(str(pid), None)
-    write_sessions(sessions)
-    return len(sessions)
+    """Unregister a session by its parent PID (with locking)."""
+    try:
+        with SessionsLock():
+            sessions = _read_sessions_unlocked()
+            sessions.pop(str(pid), None)
+            _write_sessions_unlocked(sessions)
+            return len(sessions)
+    except (OSError, TimeoutError) as e:
+        log(f"Warning: Could not lock sessions for remove: {e}")
+        return 0
 
 
 def cleanup_dead_sessions() -> int:
     """Remove sessions whose parent PIDs are no longer alive. Returns remaining count."""
-    sessions = read_sessions()
-    if not sessions:
+    try:
+        with SessionsLock():
+            sessions = _read_sessions_unlocked()
+            if not sessions:
+                return 0
+
+            alive_sessions = {}
+            for pid_str, timestamp in sessions.items():
+                try:
+                    pid = int(pid_str)
+                except ValueError:
+                    log(f"Invalid PID in sessions file: {pid_str}, removing")
+                    continue
+                if is_process_alive(pid):
+                    alive_sessions[pid_str] = timestamp
+                else:
+                    log(f"Session PID {pid} is dead, removing")
+
+            if len(alive_sessions) != len(sessions):
+                _write_sessions_unlocked(alive_sessions)
+
+            return len(alive_sessions)
+    except (OSError, TimeoutError) as e:
+        log(f"Warning: Could not lock sessions for cleanup: {e}")
         return 0
-
-    alive_sessions = {}
-    for pid_str, timestamp in sessions.items():
-        try:
-            pid = int(pid_str)
-        except ValueError:
-            log(f"Invalid PID in sessions file: {pid_str}, removing")
-            continue
-        if is_process_alive(pid):
-            alive_sessions[pid_str] = timestamp
-        else:
-            log(f"Session PID {pid} is dead, removing")
-
-    if len(alive_sessions) != len(sessions):
-        write_sessions(alive_sessions)
-
-    return len(alive_sessions)
 
 
 def read_hook_input() -> dict:

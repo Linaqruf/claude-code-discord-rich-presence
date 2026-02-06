@@ -15,7 +15,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|Read|Bash|Glob|Grep|Task|WebFetch|WebSearch",
+        "matcher": "Edit|Write|Read|Bash|Glob|Grep|LS|Task|WebFetch|WebSearch|NotebookEdit|NotebookRead|AskUserQuestion|TodoRead|TodoWrite",
         "hooks": [
           {
             "type": "command",
