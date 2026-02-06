@@ -611,11 +611,28 @@ def cleanup_dead_sessions() -> int:
 
 
 def read_hook_input() -> dict:
-    """Read JSON input from stdin (provided by Claude Code hooks)."""
+    """Read JSON input from stdin (provided by Claude Code hooks).
+
+    Uses a threaded read with timeout to prevent hanging if the stdin
+    pipe isn't closed promptly (observed in Claude Code 2.1.34+).
+    """
     try:
         if not sys.stdin.isatty():
-            data = sys.stdin.read()
-            if data.strip():
+            import threading
+            result = [None]
+
+            def _reader():
+                try:
+                    result[0] = sys.stdin.read()
+                except Exception:
+                    pass
+
+            t = threading.Thread(target=_reader, daemon=True)
+            t.start()
+            t.join(timeout=3)  # 3 second timeout
+
+            data = result[0]
+            if data and data.strip():
                 return json.loads(data)
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
         log(f"Warning: Could not parse hook input: {e}")
