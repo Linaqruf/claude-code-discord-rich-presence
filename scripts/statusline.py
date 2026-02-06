@@ -113,27 +113,18 @@ def truncate(s: str, max_len: int) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 def main():
-    # Read JSON from stdin with timeout to prevent hanging if pipe isn't closed
-    import threading
-    read_result = [None, None]  # [data, error]
-
-    def _read_stdin():
-        try:
-            read_result[0] = json.load(sys.stdin)
-        except (json.JSONDecodeError, ValueError, UnicodeDecodeError, OSError) as e:
-            read_result[1] = e
-
-    t = threading.Thread(target=_read_stdin, daemon=True)
-    t.start()
-    t.join(timeout=2)  # 2 second timeout (statusline runs frequently)
-
-    if read_result[1] is not None:
-        print(f"[statusline] Error reading input: {read_result[1]}", file=sys.stderr)
+    # Read JSON from stdin using os.read() to avoid blocking on EOF.
+    # os.read() returns immediately when pipe data is available, while
+    # sys.stdin.read()/json.load() wait for pipe closure which may hang.
+    try:
+        raw = os.read(sys.stdin.fileno(), 65536)
+        if not raw:
+            print("")
+            return
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError, OSError) as e:
+        print(f"[statusline] Error reading input: {e}", file=sys.stderr)
         print("")
-        return
-    data = read_result[0]
-    if data is None:
-        print("")  # Timeout or no data - output empty line
         return
 
     # Extract data
