@@ -52,6 +52,7 @@ SESSIONS_FILE = DATA_DIR / "sessions.json"  # Tracks active session PIDs
 ORPHAN_CHECK_INTERVAL = 30
 
 # Tool to display name mapping (keep short for Discord limit)
+## Keep in sync with PreToolUse matcher in hooks/hooks.json
 TOOL_DISPLAY = {
     # File operations
     "Edit": "Editing",
@@ -73,8 +74,6 @@ TOOL_DISPLAY = {
     "AskUserQuestion": "Asking",
     "TodoRead": "Reviewing",
     "TodoWrite": "Planning",
-    # MCP (generic)
-    "mcp": "Using MCP",
 }
 
 # Default idle timeout - used as fallback when config cannot be loaded
@@ -730,6 +729,7 @@ def run_daemon():
                 activity = "Using MCP"
             else:
                 activity = "Working"
+                log(f"Unmapped tool '{tool}', showing generic activity")
 
             # Only show file for non-idle file operations
             display_file = current_file if not is_idle and tool in FILE_TOOLS else ""
